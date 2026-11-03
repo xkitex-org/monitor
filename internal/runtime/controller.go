@@ -20,6 +20,9 @@ type Controller struct {
 	initialErr                  error
 	configured, started, closed bool
 	startup, ready, live        bool
+	evaluated                   bool
+	serviceName                 string
+	statuses                    [3]string
 	state                       func() string
 	report                      func(bool, bool)
 	server                      *http.Server
@@ -34,7 +37,7 @@ type Controller struct {
 // New 只保存检查声明，不读取环境、安装钩子、绑定端口或启动协程。
 func New(declarations []Check) *Controller {
 	checks, err := validateChecks(declarations)
-	return &Controller{checks: checks, initialErr: err, closeDone: make(chan struct{})}
+	return &Controller{serviceName: "未确定", checks: checks, initialErr: err, closeDone: make(chan struct{})}
 }
 
 // ConfigureProbe 单次读取 core 下发的 probe 节。
@@ -81,6 +84,7 @@ func (c *Controller) Start(parent context.Context, state func() string, report f
 	mux.HandleFunc("/startup", c.handler("startup"))
 	c.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second, ErrorLog: log.New(httpErrors{}, "", 0)}
 	c.started = true
+	c.logStatusesLocked(c.state())
 	go func() {
 		if err := c.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			select {
@@ -97,6 +101,7 @@ func (c *Controller) Start(parent context.Context, state func() string, report f
 // loop 主动刷新检查结果，无需 Kubernetes 先访问 HTTP。
 func (c *Controller) loop(ctx context.Context) {
 	defer close(c.done)
+	defer c.observePhase()
 	ticker := time.NewTicker(c.cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -128,11 +133,16 @@ func (c *Controller) evaluate(ctx context.Context) {
 			ready = c.group(ctx, "readiness")
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	c.mu.Lock()
 	c.live = live
+	c.evaluated = true
 	c.startup = c.startup || startup
 	c.ready = ready
 	started := c.startup
+	c.logStatusesLocked(c.state())
 	c.mu.Unlock()
 	c.report(started, ready)
 }
@@ -150,7 +160,7 @@ func (c *Controller) group(parent context.Context, kind string) bool {
 		if parent.Err() != nil {
 			return false
 		}
-		item.observe(ok)
+		item.observe(c.serviceName, ok)
 		passing = passing && ok
 	}
 	return passing && parent.Err() == nil
@@ -219,6 +229,9 @@ func (c *Controller) Close() error {
 	}
 	c.mu.Lock()
 	c.closeErr = err
+	if c.started {
+		c.logStatusesLocked(c.state())
+	}
 	close(c.closeDone)
 	c.mu.Unlock()
 	return err

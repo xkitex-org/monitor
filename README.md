@@ -75,3 +75,19 @@ core 的终止状态优先于检查结果，迟到的成功不能恢复停机中
 GOWORK=off GOTOOLCHAIN=local go test -race -timeout 60s ./...
 GOWORK=off GOTOOLCHAIN=local go build ./...
 ```
+
+
+## 状态变化日志
+
+使用 Kitex klog 分别记录 startup、readiness、liveness 的首次状态与后续变化。每条包含服务名、探针类型、前后状态、业务检查数量和采样时的 core 阶段；状态未变不重复输出。检查项失败和恢复日志也包含服务名，不输出回调错误。
+
+```text
+probe: 探针状态变化：service=[zmall-product] type=[startup] from=[Unknown] to=[Waiting] checks=[0] phase=[Starting]
+probe: 探针状态变化：service=[zmall-product] type=[startup] from=[Waiting] to=[Passing] checks=[0] phase=[Running]
+probe: 探针状态变化：service=[zmall-product] type=[readiness] from=[Waiting] to=[Passing] checks=[0] phase=[Running]
+probe: 探针状态变化：service=[zmall-product] type=[liveness] from=[Unknown] to=[Passing] checks=[0] phase=[Starting]
+```
+
+`Unknown` 表示首次记录前没有状态，`Waiting` 表示等待框架、启动前置条件或首次检查，`Passing` 表示当前成功条件满足，`Failing` 表示当前不满足成功条件，`Stopped` 表示探针已关闭。startup 完成后保持 `Passing`，体现启动完成的历史锁存。正常停机撤销 readiness，HTTP 关闭后 readiness、liveness 记录 `Stopped`。
+
+`checks=[0]` 明确表示没有配置该类业务检查：startup、readiness 随实例运行阶段通过；liveness 默认通过。它不代表自动检查过数据库、Redis 或 RPC。服务名由新版 core 的可选身份协议传入；独立使用或旧版 core 未传入时记作 `未确定`，不从环境变量自行推断。

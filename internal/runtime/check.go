@@ -57,13 +57,13 @@ func (c *check) run(ctx context.Context) bool {
 }
 
 // observe 仅在结果变化时输出安全日志，不输出回调错误。
-func (c *check) observe(passing bool) {
+func (c *check) observe(service string, passing bool) {
 	if !c.observed || c.passing != passing {
 		if !passing {
-			klog.Warnf("probe: 检查未通过：type=[%s] name=[%s]", c.Kind, c.Name)
+			klog.Warnf("probe: 检查未通过：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
 		}
 		if c.observed && passing {
-			klog.Infof("probe: 检查已恢复：type=[%s] name=[%s]", c.Kind, c.Name)
+			klog.Infof("probe: 检查已恢复：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
 		}
 	}
 	c.observed, c.passing = true, passing
