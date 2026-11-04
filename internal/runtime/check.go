@@ -3,9 +3,10 @@ package runtime
 import (
 	"context"
 	"errors"
-	"github.com/cloudwego/kitex/pkg/klog"
 	"regexp"
 	"sync/atomic"
+
+	"github.com/cloudwego/kitex/pkg/klog"
 )
 
 // Check 是内部检查声明，不暴露可变检查状态。
@@ -17,8 +18,8 @@ type Check struct {
 // check 持有执行占用位，同一不遵守取消的回调最多占用一个工作协程。
 type check struct {
 	Check
-	busy              atomic.Bool
-	observed, passing bool
+	busy   atomic.Bool
+	status atomic.Uint32
 }
 
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -29,7 +30,7 @@ func validateChecks(checks []Check) ([]*check, error) {
 	result := make([]*check, 0, len(checks))
 	for _, item := range checks {
 		if item.Kind != "startup" && item.Kind != "readiness" && item.Kind != "liveness" || !validName.MatchString(item.Name) || item.Func == nil || seen[item.Kind+"/"+item.Name] {
-			return nil, errors.New("probe: 检查类型、名称或回调无效，或者存在同类重名检查")
+			return nil, errors.New("monitor: 检查类型、名称或回调无效，或者存在同类重名检查")
 		}
 		seen[item.Kind+"/"+item.Name] = true
 		result = append(result, &check{Check: item})
@@ -58,13 +59,17 @@ func (c *check) run(ctx context.Context) bool {
 
 // observe 仅在结果变化时输出安全日志，不输出回调错误。
 func (c *check) observe(service string, passing bool) {
-	if !c.observed || c.passing != passing {
-		if !passing {
-			klog.Warnf("probe: 检查未通过：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
-		}
-		if c.observed && passing {
-			klog.Infof("probe: 检查已恢复：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
-		}
+	next := uint32(2)
+	if passing {
+		next = 1
 	}
-	c.observed, c.passing = true, passing
+	previous := c.status.Swap(next)
+	if previous == next {
+		return
+	}
+	if !passing {
+		klog.Warnf("monitor: 检查未通过：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
+	} else if previous != 0 {
+		klog.Infof("monitor: 检查已恢复：service=[%s] type=[%s] name=[%s]", service, c.Kind, c.Name)
+	}
 }

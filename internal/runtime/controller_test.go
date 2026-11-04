@@ -29,7 +29,7 @@ func waitFor(t *testing.T, condition func() bool) {
 func testController(t *testing.T, checks []Check, phase *atomic.Value, report func(bool, bool)) *Controller {
 	t.Helper()
 	c := New(checks)
-	if err := c.ConfigureProbe([]byte("interval: 5ms\ntimeout: 10ms")); err != nil {
+	if err := c.ConfigureMonitor([]byte("interval: 5ms\ntimeout: 10ms")); err != nil {
 		t.Fatal(err)
 	}
 	c.cfg.Port = 0
@@ -154,7 +154,7 @@ func TestPortConflictFatalAndConcurrentClose(t *testing.T) {
 	}
 	defer listener.Close()
 	c := New(nil)
-	if err := c.ConfigureProbe([]byte(fmt.Sprintf("port: %d", listener.Addr().(*net.TCPAddr).Port))); err != nil {
+	if err := c.ConfigureMonitor([]byte(fmt.Sprintf("port: %d", listener.Addr().(*net.TCPAddr).Port))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Start(context.Background(), func() string { return "Running" }, func(bool, bool) {}); err == nil {
@@ -184,16 +184,16 @@ func TestPortConflictFatalAndConcurrentClose(t *testing.T) {
 // TestStrictConfigurationAndOptions 验证配置缺省、未知字段、非法值及无效检查声明。
 func TestStrictConfigurationAndOptions(t *testing.T) {
 	cfg, err := parseSettings(nil)
-	if err != nil || cfg.Port != 22222 {
+	if err != nil || cfg.Port != 9091 {
 		t.Fatal("bad defaults")
 	}
-	for _, body := range []string{"null", "[]", "port: 0", "port: 22222.0", "port: '22222'", "port: 65536", "interval: 0s", "timeout: invalid-private-value", "enabled: true", "port: null", "{}\n---\n{}", "port: 1\nport: 2"} {
+	for _, body := range []string{"null", "[]", "port: 0", "port: 9091.0", "port: '9091'", "port: 65536", "interval: 0s", "timeout: invalid-private-value", "enabled: true", "sample_interval: 0s", "sample_timeout: bad", "sample_interval: null", "sample_timeout: 10", "port: null", "{}\n---\n{}", "port: 1\nport: 2"} {
 		if _, err := parseSettings([]byte(body)); err == nil {
 			t.Fatalf("invalid config accepted: %q", body)
 		}
 	}
 	for _, checks := range [][]Check{{{}}, {{Kind: "readiness", Name: "x"}}, {{Kind: "readiness", Name: "x", Func: func(context.Context) error { return nil }}, {Kind: "readiness", Name: "x", Func: func(context.Context) error { return nil }}}} {
-		if err := New(checks).ConfigureProbe(nil); err == nil {
+		if err := New(checks).ConfigureMonitor(nil); err == nil {
 			t.Fatal("invalid checks accepted")
 		}
 	}

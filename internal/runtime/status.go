@@ -43,7 +43,7 @@ func (c *Controller) logStatusesLocked(phase string) {
 			previous = "Unknown"
 		}
 		c.statuses[i] = next
-		klog.Infof("probe: 探针状态变化：service=[%s] type=[%s] from=[%s] to=[%s] checks=[%d] phase=[%s]", service, kind, previous, next, count, phase)
+		klog.Infof("monitor: 探针状态变化：service=[%s] type=[%s] from=[%s] to=[%s] checks=[%d] phase=[%s]", service, kind, previous, next, count, phase)
 	}
 }
 

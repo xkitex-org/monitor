@@ -4,17 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cloudwego/kitex/pkg/klog"
 	"log"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
+
+	"github.com/cloudwego/kitex/pkg/klog"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Controller 持有单实例配置、主动检查任务及 HTTP 服务，不使用全局健康标志。
 type Controller struct {
 	mu                          sync.RWMutex
+	collectors                  []prometheus.Collector
+	metrics                     *metrics
+	sampler                     *sampler
+	sampleDone                  chan struct{}
 	checks                      []*check
 	cfg                         settings
 	initialErr                  error
@@ -35,20 +42,48 @@ type Controller struct {
 }
 
 // New 只保存检查声明，不读取环境、安装钩子、绑定端口或启动协程。
-func New(declarations []Check) *Controller {
+func New(declarations []Check, collectors ...prometheus.Collector) *Controller {
 	checks, err := validateChecks(declarations)
-	return &Controller{serviceName: "未确定", checks: checks, initialErr: err, closeDone: make(chan struct{})}
+	for _, collector := range collectors {
+		if collector == nil || reflect.ValueOf(collector).Kind() == reflect.Pointer && reflect.ValueOf(collector).IsNil() {
+			err = errors.New("monitor: 自定义指标不能为 nil")
+		}
+	}
+	return &Controller{serviceName: "未确定", checks: checks, collectors: collectors, sampler: newSampler(readProcess), initialErr: err, closeDone: make(chan struct{})}
 }
 
-// ConfigureProbe 单次读取 core 下发的 probe 节。
-func (c *Controller) ConfigureProbe(body []byte) error {
+// AddReadiness 在启动前接收 core 自动挂载的依赖检查，不允许覆盖业务同名检查。
+func (c *Controller) AddReadiness(name string, callback func(context.Context) error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.initialErr != nil {
+		return c.initialErr
+	}
+	if c.started || c.closed {
+		return errors.New("monitor: 就绪检查只能在启动前注册")
+	}
+	checks, err := validateChecks([]Check{{Kind: "readiness", Name: name, Func: callback}})
+	if err != nil {
+		return err
+	}
+	for _, existing := range c.checks {
+		if existing.Kind == "readiness" && existing.Name == name {
+			return errors.New("monitor: 存在同名就绪检查")
+		}
+	}
+	c.checks = append(c.checks, checks...)
+	return nil
+}
+
+// ConfigureMonitor 单次读取 core 下发的 monitor 节。
+func (c *Controller) ConfigureMonitor(body []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.initialErr != nil {
 		return c.initialErr
 	}
 	if c.configured || c.closed {
-		return errors.New("probe: 配置只允许在启动前应用一次")
+		return errors.New("monitor: 配置只允许在启动前应用一次")
 	}
 	cfg, err := parseSettings(body)
 	if err != nil {
@@ -63,15 +98,20 @@ func (c *Controller) Start(parent context.Context, state func() string, report f
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.configured || c.started || c.closed || parent == nil || state == nil || report == nil {
-		return nil, errors.New("probe: 启动参数或生命周期无效")
+		return nil, errors.New("monitor: 启动参数或生命周期无效")
+	}
+	if err := c.prepareMetrics(); err != nil {
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", c.cfg.Port))
 	if err != nil {
-		return nil, errors.New("probe: HTTP 端口绑定失败")
+		return nil, errors.New("monitor: HTTP 端口绑定失败")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	c.state, c.report, c.listener, c.cancel = state, report, listener, cancel
 	c.done, c.fatal = make(chan struct{}), make(chan error, 1)
+	c.sampleDone = make(chan struct{})
+	c.sampler.serviceName = c.serviceName
 	c.live = true
 	for _, item := range c.checks {
 		if item.Kind == "liveness" {
@@ -82,19 +122,22 @@ func (c *Controller) Start(parent context.Context, state func() string, report f
 	mux.HandleFunc("/live", c.handler("live"))
 	mux.HandleFunc("/ready", c.handler("ready"))
 	mux.HandleFunc("/startup", c.handler("startup"))
+	mux.HandleFunc("/info", c.infoHandler)
+	mux.Handle("/metrics", c.metricsHandler())
 	c.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second, ErrorLog: log.New(httpErrors{}, "", 0)}
 	c.started = true
 	c.logStatusesLocked(c.state())
 	go func() {
 		if err := c.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			select {
-			case c.fatal <- errors.New("probe: HTTP 服务异常退出"):
+			case c.fatal <- errors.New("monitor: HTTP 服务异常退出"):
 			default:
 			}
 		}
 	}()
 	go c.loop(ctx)
-	klog.Infof("probe: HTTP 探针已启动：addr=[%s]", listener.Addr())
+	go func() { defer close(c.sampleDone); c.sampler.loop(ctx, c.cfg.SampleInterval, c.cfg.SampleTimeout) }()
+	klog.Infof("monitor: HTTP 监控已启动：addr=[%s] endpoints=[/live,/ready,/startup,/info,/metrics]", listener.Addr())
 	return c.fatal, nil
 }
 
@@ -176,15 +219,14 @@ func (c *Controller) handler(kind string) http.HandlerFunc {
 		}
 		phase := c.state()
 		c.mu.RLock()
-		healthy := false
-		switch kind {
-		case "live":
-			healthy = c.live && phase != "Failed" && phase != "Stopped"
-		case "startup":
-			healthy = c.startup
-		case "ready":
-			healthy = phase == "Running" && c.startup && c.ready && !c.closed
+		name := kind
+		if kind == "live" {
+			name = "liveness"
 		}
+		if kind == "ready" {
+			name = "readiness"
+		}
+		healthy := c.status(name, phase) == "Passing"
 		c.mu.RUnlock()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -218,6 +260,9 @@ func (c *Controller) Close() error {
 	if done != nil {
 		<-done
 	}
+	if c.sampleDone != nil {
+		<-c.sampleDone
+	}
 	var err error
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -242,6 +287,6 @@ type httpErrors struct{}
 
 // Write 输出固定错误，避免回显可能含请求信息的原始诊断。
 func (httpErrors) Write(data []byte) (int, error) {
-	klog.Errorf("probe: HTTP 服务内部错误")
+	klog.Errorf("monitor: HTTP 服务内部错误")
 	return len(data), nil
 }

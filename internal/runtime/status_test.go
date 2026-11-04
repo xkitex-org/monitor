@@ -33,8 +33,8 @@ func (o *statusOutput) String() string {
 	return o.body.String()
 }
 
-// TestNamedProbeTransitionLogs 验证三个探针分别记录首次状态、失败恢复和停机，并与 HTTP 结果一致。
-func TestNamedProbeTransitionLogs(t *testing.T) {
+// TestNamedMonitorTransitionLogs 验证三个探针分别记录首次状态、失败恢复和停机，并与 HTTP 结果一致。
+func TestNamedMonitorTransitionLogs(t *testing.T) {
 	var output statusOutput
 	klog.SetOutput(&output)
 	defer klog.SetOutput(os.Stderr)
@@ -58,7 +58,7 @@ func TestNamedProbeTransitionLogs(t *testing.T) {
 		}},
 	})
 	c.SetServiceName("zmall-product")
-	if err := c.ConfigureProbe([]byte("interval: 5ms\ntimeout: 10ms")); err != nil {
+	if err := c.ConfigureMonitor([]byte("interval: 5ms\ntimeout: 10ms")); err != nil {
 		t.Fatal(err)
 	}
 	c.cfg.Port = 0
@@ -118,14 +118,14 @@ func TestNamedProbeTransitionLogs(t *testing.T) {
 	}
 }
 
-// TestDefaultProbeLogsWithoutPolling 验证没有业务检查和 HTTP 轮询时，默认行为仍分别输出且不刷屏。
-func TestDefaultProbeLogsWithoutPolling(t *testing.T) {
+// TestDefaultMonitorLogsWithoutPolling 验证没有业务检查和 HTTP 轮询时，默认行为仍分别输出且不刷屏。
+func TestDefaultMonitorLogsWithoutPolling(t *testing.T) {
 	var output statusOutput
 	klog.SetOutput(&output)
 	defer klog.SetOutput(os.Stderr)
 	c := New(nil)
 	c.SetServiceName("zmall-product")
-	if err := c.ConfigureProbe(nil); err != nil {
+	if err := c.ConfigureMonitor(nil); err != nil {
 		t.Fatal(err)
 	}
 	c.state = func() string { return "Running" }
@@ -140,6 +140,6 @@ func TestDefaultProbeLogsWithoutPolling(t *testing.T) {
 		}
 	}
 	if strings.Count(logs, "探针状态变化") != 3 {
-		t.Fatal("unchanged probe results generated repeated logs")
+		t.Fatal("unchanged monitor results generated repeated logs")
 	}
 }
